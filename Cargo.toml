@@ -1,0 +1,20 @@
+[package]
+name = "code-llm"
+version = "0.1.0"
+edition = "2021"
+description = "Constrained decoding for local LLMs — GBNF grammar and structural validators"
+authors = ["Daniel Ullfig"]
+
+[dependencies]
+llama-cpp-2 = "0.1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+metal = ["llama-cpp-2/metal"]
