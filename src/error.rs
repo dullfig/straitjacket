@@ -1,8 +1,8 @@
 use thiserror::Error;
 
-/// All errors that can occur in codeLlm.
+/// All errors that can occur in straitjacket.
 #[derive(Debug, Error)]
-pub enum CodeLlmError {
+pub enum StraitjacketError {
     #[error("failed to load model: {0}")]
     ModelLoad(String),
 

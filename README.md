@@ -1,85 +1,94 @@
-# codeLlm
+# straitjacket
 
-LSP-constrained local code generation. A Claude Code plugin that delegates code writing to a small local model where every token is validated by a language server.
+Grammar-constrained decoding for local LLMs. A small model wearing this **cannot emit
+structurally invalid output** — not "is unlikely to," cannot.
 
-## The Idea
+Pure Rust on [candle](https://github.com/huggingface/candle). No C++ deps, no cmake, no LLVM.
 
-Current LLMs hallucinate APIs, produce syntax errors, reference nonexistent symbols. They memorize code facts in billions of parameters, then get them wrong anyway.
+## The idea
 
-codeLlm takes a different approach: wire the language server directly into the token prediction loop. The model generates code, but at every uncertain decision point — field access, method call, type annotation — the LSP constrains the output to only valid continuations. The result is a model that **cannot produce invalid code**.
+Asking a 0.5B model to emit a well-formed tool call and hoping is a losing game. Prompt it
+harder, add few-shot examples, retry on parse failure — you are still negotiating with a
+probability distribution.
 
-## How It Works
+Don't negotiate. Constrain the decoder.
 
-1. **Multi-token prediction** with confidence thresholds (based on [mtp-lm](https://github.com/jwkirchenbauer/mtp-lm))
-2. **High confidence (>90%)** → emit multiple tokens at once. Boilerplate, common patterns.
-3. **Low confidence** → query the LSP for valid completions at this cursor position
-4. **Mask logits** to only allow valid tokens, sample from constrained distribution
-5. **Confidence recovers**, generation accelerates again
+At every step, the grammar knows which tokens could legally come next. Mask the logits for
+everything else to `-inf` and sample from what remains. Invalid output isn't rejected after
+the fact; it is never reachable. The model has exactly as much freedom as the schema allows
+and not one token more.
 
-The LSP only fires when the model is uncertain — exactly when it's most likely to hallucinate — and exactly when type information resolves the ambiguity.
+That's the name. A straitjacket doesn't ask you not to move.
 
-## Key Insight: It Can Only Answer in Code
-
-LSP constraints are meaningless for natural language. This model is structurally incapable of generating English explanations. It's a **pure code function**: task in, valid code out.
-
-This is the feature, not the limitation. The conversational layer belongs to the orchestrator (Claude, Opus). The coding layer belongs to codeLlm. Clean separation.
-
-## Architecture
+## How it works
 
 ```
-Claude Code (cloud, orchestrator)
-  └── MCP tool: codeLlm
-        ├── local model (small, code-focused, MTP-enabled)
-        ├── tree-sitter (incremental parse state)
-        └── LSP (rust-analyzer, pyright, etc.)
+ToolSchema  ──▶  grammar (GBNF / Lark)  ──▶  DecodingConstraint
+                                                    │
+   prompt ──▶ candle inference ──▶ logits ──▶ mask ─┘ ──▶ sample ──▶ valid output
 ```
 
-### As a Claude Code Plugin (MCP Server)
+1. Describe the shape you want as a `ToolSchema` (fields, types, required-ness).
+2. `grammar::to_gbnf` / `to_lark` derive a grammar from it.
+3. `XmlSchemaConstraint` tracks parse state and, each step, computes the legal token set.
+4. `InferenceEngine` masks the logits and samples only from that set.
 
-```json
-{
-  "name": "generate_code",
-  "parameters": {
-    "language": "rust",
-    "task": "implement the Handler trait for WebSearchTool",
-    "context": "// surrounding code, imports, types in scope"
-  }
-}
+Incremental constraint dispatch means the legal set is computed against parse state rather
+than rebuilt per token — that's where the 11x over the naive implementation came from.
+
+## Usage
+
+```rust
+use straitjacket::prelude::*;
+
+let mut engine = InferenceEngine::from_gguf(
+    "models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "models/tokenizer.json",
+    EngineConfig { n_ctx: 4096, n_gpu_layers: 0, seed: 0, temperature: 0.7, top_p: 0.9 },
+)?;
+
+let mut constraint = XmlSchemaConstraint::new(schema, engine.tokenizer());
+let (xml, stats) = engine.complete_constrained(prompt, &mut constraint, prefix, max_tokens)?;
+// xml is guaranteed to parse and to match `schema`
 ```
 
-Returns: guaranteed-valid code block.
+`prefix` is injected ahead of generation — pass the opening tag when you want the model to
+resume inside a partially-written structure rather than start from nothing.
 
-### As an AgentOS Listener
+## Modules
 
-Same engine, different wrapper. The local model becomes a callable organism in the AgentOS pipeline — Opus orchestrates, codeLlm generates structurally correct code.
+| module | what it does |
+|---|---|
+| `constraint` | `DecodingConstraint` trait + `XmlSchemaConstraint` — the logit masking |
+| `engine` | candle inference, GGUF loading, the constrained sampling loop |
+| `grammar` | `to_gbnf`, `to_lark` — schema to grammar |
+| `schema` | `ToolSchema`, `SchemaField`, `ToolFieldType` |
 
-## Why Small Models Work Here
+## Who uses it
 
-Current code models (7B-34B parameters) spend a huge chunk of their parameter budget memorizing API surfaces — every method on every type in every library. If the LSP handles that lookup at inference time, the model only needs to learn **code patterns**, not **code facts**.
+[AgentOS](https://github.com/dullfig/AgentOS)'s semantic router. When the orchestrating model
+produces prose describing an action instead of a proper tool call, AgentOS matches the text to
+a tool and hands the fill job here — the WIT interface for that tool becomes a `ToolSchema`,
+and the local model fills it under constraint, with a cloud model as fallback.
 
-Hypothesis: you can get away with a dramatically smaller model. Small enough for a Raspberry Pi.
+The value scales as the driving model shrinks. A frontier model formats its own tool calls; a
+local 0.5B needs the jacket.
 
-Rust is the ideal first target — the type system is so rich that the LSP constraint signal is incredibly strong. rust-analyzer knows exactly what's valid at every cursor position.
+## A note on the name
 
-## Components
+This repo was called `code-llm` until 2026-08-16. It started as an experiment in
+LSP-constrained code generation — wire a language server into the token loop so a local model
+could not reference a symbol that doesn't exist — as part of a Claude Code workalike.
 
-- **Inference engine** — Modified llama.cpp (or similar) with logit constraint injection hook
-- **LSP bridge** — Translates valid completions → token IDs → logit mask
-- **Parse state** — tree-sitter incremental parsing alongside generation
-- **MCP server** — Claude Code plugin interface
-- **Model** — Fine-tuned small code model with MTP objective
+That was never built. Claude Code outgrew the premise, and the coding-agent ambition was
+dropped. What survived, and what this repo has always actually contained, is the constrained
+decoding machinery. The LSP idea remains sound and could be built on top of
+`DecodingConstraint` — it would be one more implementation of the trait — but no LSP code has
+ever existed here.
 
-## Prior Art
-
-- [mtp-lm](https://github.com/jwkirchenbauer/mtp-lm) — Multi-token prediction via self-distillation, ConfAdapt mechanism
-- [L-MTP](https://github.com/Xiaohao-Liu/L-MTP) — Leap multi-token prediction (NeurIPS 2025)
-- [PICARD](https://arxiv.org/abs/2109.05093) — Constrained decoding for SQL via incremental parser
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) — Local inference with grammar-constrained decoding (GBNF)
-
-## Status
-
-Research prototype. Design doc at `C:\Users\Daniel\.claude\projects\C--src-BestCode\memory\lsp-constrained-codegen.md`.
+The old README described the abandoned plan rather than the working library, which nearly got
+the whole thing deleted as dead weight. Hence the rename, and hence this section.
 
 ## License
 
-TBD
+See repository.

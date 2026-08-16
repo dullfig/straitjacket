@@ -4,7 +4,7 @@ use crate::schema::{ToolFieldType, ToolSchema};
 /// matching the given tool schema.
 ///
 /// Lark is the grammar format used by llguidance (pure Rust constrained
-/// decoding engine). This is the primary grammar format for codeLlm.
+/// decoding engine). This is the primary grammar format for straitjacket.
 ///
 /// The grammar enforces:
 /// - Correct root tag wrapping

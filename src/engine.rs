@@ -8,7 +8,7 @@ use tokenizers::Tokenizer;
 use tracing::info;
 
 use crate::constraint::DecodingConstraint;
-use crate::error::CodeLlmError;
+use crate::error::StraitjacketError;
 
 /// Configuration for the inference engine.
 #[derive(Debug, Clone)]
@@ -71,7 +71,7 @@ impl InferenceEngine {
         model_path: impl AsRef<Path>,
         tokenizer_path: impl AsRef<Path>,
         config: EngineConfig,
-    ) -> Result<Self, CodeLlmError> {
+    ) -> Result<Self, StraitjacketError> {
         let model_path = model_path.as_ref();
         let tokenizer_path = tokenizer_path.as_ref();
         info!("loading model from {}", model_path.display());
@@ -80,14 +80,14 @@ impl InferenceEngine {
 
         // Load HuggingFace tokenizer
         let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| CodeLlmError::ModelLoad(format!("tokenizer: {e}")))?;
+            .map_err(|e| StraitjacketError::ModelLoad(format!("tokenizer: {e}")))?;
 
         // Load GGUF model
         let mut file = std::fs::File::open(model_path)?;
         let content = gguf_file::Content::read(&mut file)
-            .map_err(|e| CodeLlmError::ModelLoad(format!("GGUF: {e}")))?;
+            .map_err(|e| StraitjacketError::ModelLoad(format!("GGUF: {e}")))?;
         let model = ModelWeights::from_gguf(content, &mut file, &device)
-            .map_err(|e| CodeLlmError::ModelLoad(format!("{e}")))?;
+            .map_err(|e| StraitjacketError::ModelLoad(format!("{e}")))?;
 
         // Resolve EOS token — try Qwen's known EOS tokens
         let eos_token_id = tokenizer
@@ -111,7 +111,7 @@ impl InferenceEngine {
     }
 
     /// Unconstrained text completion.
-    pub fn complete(&mut self, prompt: &str, max_tokens: u32) -> Result<String, CodeLlmError> {
+    pub fn complete(&mut self, prompt: &str, max_tokens: u32) -> Result<String, StraitjacketError> {
         let (text, _stats) = self.run_completion(prompt, None, "", max_tokens)?;
         Ok(text)
     }
@@ -131,7 +131,7 @@ impl InferenceEngine {
         constraint: &mut dyn DecodingConstraint,
         prefix: &str,
         max_tokens: u32,
-    ) -> Result<(String, CompletionStats), CodeLlmError> {
+    ) -> Result<(String, CompletionStats), StraitjacketError> {
         constraint.reset();
         self.run_completion(prompt, Some(&*constraint), prefix, max_tokens)
     }
@@ -153,7 +153,7 @@ impl InferenceEngine {
         constraint: Option<&dyn DecodingConstraint>,
         prefix: &str,
         max_tokens: u32,
-    ) -> Result<(String, CompletionStats), CodeLlmError> {
+    ) -> Result<(String, CompletionStats), StraitjacketError> {
         let mut stats = CompletionStats {
             total_tokens: 0,
             forced_tokens: 0,
@@ -165,7 +165,7 @@ impl InferenceEngine {
         let prompt_enc = self
             .tokenizer
             .encode(prompt, true)
-            .map_err(|e| CodeLlmError::Decode(format!("tokenize: {e}")))?;
+            .map_err(|e| StraitjacketError::Decode(format!("tokenize: {e}")))?;
         let prompt_tokens = prompt_enc.get_ids();
 
         if prompt_tokens.is_empty() {
@@ -176,7 +176,7 @@ impl InferenceEngine {
         let prefix_ids: Vec<u32> = if !prefix.is_empty() {
             self.tokenizer
                 .encode(prefix, false)
-                .map_err(|e| CodeLlmError::Decode(format!("prefix tokenize: {e}")))?
+                .map_err(|e| StraitjacketError::Decode(format!("prefix tokenize: {e}")))?
                 .get_ids()
                 .to_vec()
         } else {
@@ -256,7 +256,7 @@ impl InferenceEngine {
                     output_text = self
                         .tokenizer
                         .decode(&output_ids, false)
-                        .map_err(|e| CodeLlmError::Decode(format!("decode: {e}")))?;
+                        .map_err(|e| StraitjacketError::Decode(format!("decode: {e}")))?;
                     stats.forced_tokens += 1;
                     stats.total_tokens += 1;
                     tokens_remaining -= 1;
@@ -292,7 +292,7 @@ impl InferenceEngine {
             output_text = self
                 .tokenizer
                 .decode(&output_ids, false)
-                .map_err(|e| CodeLlmError::Decode(format!("decode: {e}")))?;
+                .map_err(|e| StraitjacketError::Decode(format!("decode: {e}")))?;
             stats.sampled_tokens += 1;
             stats.total_tokens += 1;
             tokens_remaining -= 1;
@@ -311,13 +311,13 @@ impl InferenceEngine {
 
             // Forward pass for sampled token — updates KV cache, produces next logits
             let input = Tensor::new(&[next_token], &self.device)
-                .map_err(|e| CodeLlmError::Decode(format!("tensor: {e}")))?
+                .map_err(|e| StraitjacketError::Decode(format!("tensor: {e}")))?
                 .unsqueeze(0)
-                .map_err(|e| CodeLlmError::Decode(format!("unsqueeze: {e}")))?;
+                .map_err(|e| StraitjacketError::Decode(format!("unsqueeze: {e}")))?;
             current_logits = self
                 .model
                 .forward(&input, pos)
-                .map_err(|e| CodeLlmError::Decode(format!("forward: {e}")))?;
+                .map_err(|e| StraitjacketError::Decode(format!("forward: {e}")))?;
             current_logits = self.squeeze_last_logits(current_logits)?;
             pos += 1;
             stats.forward_passes += 1;
@@ -327,33 +327,33 @@ impl InferenceEngine {
     }
 
     /// Forward a batch of token IDs through the model, return logits for last position.
-    fn forward_batch(&mut self, token_ids: &[u32], pos: usize) -> Result<Tensor, CodeLlmError> {
+    fn forward_batch(&mut self, token_ids: &[u32], pos: usize) -> Result<Tensor, StraitjacketError> {
         let input = Tensor::new(token_ids, &self.device)
-            .map_err(|e| CodeLlmError::Decode(format!("tensor: {e}")))?
+            .map_err(|e| StraitjacketError::Decode(format!("tensor: {e}")))?
             .unsqueeze(0)
-            .map_err(|e| CodeLlmError::Decode(format!("unsqueeze: {e}")))?;
+            .map_err(|e| StraitjacketError::Decode(format!("unsqueeze: {e}")))?;
 
         let logits = self
             .model
             .forward(&input, pos)
-            .map_err(|e| CodeLlmError::Decode(format!("forward: {e}")))?;
+            .map_err(|e| StraitjacketError::Decode(format!("forward: {e}")))?;
 
         self.squeeze_last_logits(logits)
     }
 
     /// Squeeze batch dimension and select last position's logits.
-    fn squeeze_last_logits(&self, logits: Tensor) -> Result<Tensor, CodeLlmError> {
+    fn squeeze_last_logits(&self, logits: Tensor) -> Result<Tensor, StraitjacketError> {
         let logits = logits
             .squeeze(0)
-            .map_err(|e| CodeLlmError::Decode(format!("squeeze: {e}")))?;
+            .map_err(|e| StraitjacketError::Decode(format!("squeeze: {e}")))?;
 
         if logits.dims().len() == 2 {
             let seq_len = logits
                 .dim(0)
-                .map_err(|e| CodeLlmError::Decode(format!("dim: {e}")))?;
+                .map_err(|e| StraitjacketError::Decode(format!("dim: {e}")))?;
             logits
                 .get(seq_len - 1)
-                .map_err(|e| CodeLlmError::Decode(format!("get last: {e}")))
+                .map_err(|e| StraitjacketError::Decode(format!("get last: {e}")))
         } else {
             Ok(logits)
         }
@@ -367,7 +367,7 @@ impl InferenceEngine {
         constraint: Option<&dyn DecodingConstraint>,
         generated_text: &str,
         vocab_size: usize,
-    ) -> Result<u32, CodeLlmError> {
+    ) -> Result<u32, StraitjacketError> {
         match constraint {
             Some(c) => {
                 let mask = c.valid_tokens(generated_text, vocab_size);
@@ -379,11 +379,11 @@ impl InferenceEngine {
                             }
                         }
                     })
-                    .map_err(|e| CodeLlmError::Decode(format!("sample: {e}")))
+                    .map_err(|e| StraitjacketError::Decode(format!("sample: {e}")))
             }
             None => logits_processor
                 .sample(logits)
-                .map_err(|e| CodeLlmError::Decode(format!("sample: {e}"))),
+                .map_err(|e| StraitjacketError::Decode(format!("sample: {e}"))),
         }
     }
 

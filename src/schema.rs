@@ -1,5 +1,5 @@
 //! Standalone tool schema types — no AgentOS dependency.
-//! AgentOS converts its WIT `ToolInterface` → codeLlm `ToolSchema` at the integration boundary.
+//! AgentOS converts its WIT `ToolInterface` → straitjacket `ToolSchema` at the integration boundary.
 
 /// A tool's parameter schema, used to generate GBNF grammars.
 #[derive(Debug, Clone)]
